@@ -1,0 +1,5 @@
+cardiac-arrhythmia-predictor/ECG-Classification-XGBoost/
+cardiac-arrhythmia-predictor/multimodule-ecg-classification/
+cardiac_predictor/data/*.csv
+node_modules/
+dist/
