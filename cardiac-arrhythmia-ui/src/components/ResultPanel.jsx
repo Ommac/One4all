@@ -57,13 +57,6 @@ export default function ResultPanel({ result, loading }) {
         </div>
       </div>
 
-      {result.low_confidence && (
-        <div style={{ background: '#fff8eb', border: '1px solid #f59e0b', color: '#92400e', padding: '12px', borderRadius: '4px', marginBottom: '16px', display: 'flex', gap: '8px' }}>
-          <span>⚠️</span>
-          <span>Signal Quality Notice: Your signal had {result.original_length} points. Model is optimized for 2500 points. Prediction may be less accurate.</span>
-        </div>
-      )}
-
       <div className="summary-grid">
         <div className="summary-item">
           <span className="summary-label">Classification</span>
@@ -84,13 +77,6 @@ export default function ResultPanel({ result, loading }) {
         </div>
       </div>
 
-      {result.was_normalized && !result.low_confidence && (
-        <div style={{ color: '#6b7280', fontSize: '0.875rem', marginTop: '4px', marginBottom: '16px', display: 'flex', gap: '4px' }}>
-          <span>ℹ️</span> Signal normalized from {result.original_length} → 2500 points
-        </div>
-      )}
-
-      {result.signal_warning && <div className="status-banner warning">{result.signal_warning}</div>}
       {result.warning && <div className="status-banner warning">{result.warning}</div>}
 
       {probabilities.length > 0 && (

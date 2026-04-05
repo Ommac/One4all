@@ -93,6 +93,25 @@ export default function App() {
 
         {result && (
           <>
+            {result.low_confidence === true && (
+              <div style={{ background: '#fff8eb', border: '1px solid #f59e0b', color: '#92400e', padding: '12px 16px', borderRadius: '8px', display: 'flex', gap: '8px', fontWeight: 600 }}>
+                <span>⚠️</span>
+                <span>Signal Quality Notice: Your signal had {result.original_length} points. Model is optimized for 2500 points. Prediction may be less accurate.</span>
+              </div>
+            )}
+
+            {result.was_normalized === true && result.low_confidence === false && (
+              <div style={{ color: '#6b7280', fontSize: '0.875rem', display: 'flex', gap: '4px', paddingLeft: '8px' }}>
+                <span>ℹ️</span> Signal normalized from {result.original_length} → 2500 points
+              </div>
+            )}
+
+            {result.signal_warning && (
+              <div className="bg-amber-50 text-amber-600 border border-amber-200 p-4 rounded-lg font-bold">
+                {result.signal_warning}
+              </div>
+            )}
+
             <VitalsStrip 
               hr={vitals.hr} 
               pr={vitals.pr} 

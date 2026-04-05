@@ -23,9 +23,15 @@ warnings.filterwarnings('ignore')
 import numpy as np
 import torch
 import torch.nn.functional as F
+import joblib
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import f1_score, classification_report, confusion_matrix
 from sklearn.preprocessing import StandardScaler
+
+try:
+    from tensorflow.keras.models import load_model as keras_load_model
+except ImportError:
+    keras_load_model = None
 
 # Import local modules (same as training)
 from src.preprocessing import load_dataset
@@ -45,6 +51,9 @@ LSTM_LENGTH = 500  # Downsampled (every 5th point)
 # Model paths
 CNN_MODEL_PATH = os.path.join(MODELS_DIR, 'cnn_model.h5')
 LSTM_MODEL_PATH = os.path.join(MODELS_DIR, 'lstm_model.h5')
+ENSEMBLE_MODEL_PATH = os.path.join(MODELS_DIR, 'ensemble_model.h5')
+ENSEMBLE_SCALER_PATH = os.path.join(MODELS_DIR, 'scaler.pkl')
+ENSEMBLE_LABEL_ENCODER_PATH = os.path.join(MODELS_DIR, 'label_encoder.pkl')
 
 # Class names (alphabetical order from LabelEncoder)
 CLASS_NAMES = ['AFib', 'Normal', 'VFib']
@@ -63,6 +72,48 @@ def print_header(title):
 def print_separator():
     """Print separator line."""
     print("-" * 60)
+
+
+def compute_and_print_f1_table(model_name, y_true, y_pred, class_names):
+    """
+    Compute per-class TP, TN, FP, FN, Precision, Recall, F1
+    and print the formatted table.
+
+    Args:
+        model_name: Name of the model for the header
+        y_true: Ground truth labels
+        y_pred: Predicted labels
+        class_names: List of class name strings
+
+    Returns:
+        macro_f1: Macro-averaged F1 score
+    """
+    num_classes = len(class_names)
+    n = len(y_true)
+
+    print(f"\n=== {model_name} ===")
+    print(f"{'Class':<12}{'TP':>6}{'TN':>6}{'FP':>6}{'FN':>6}{'Precision':>12}{'Recall':>10}{'F1':>10}")
+
+    f1_scores = []
+    for c in range(num_classes):
+        tp = int(np.sum((y_true == c) & (y_pred == c)))
+        tn = int(np.sum((y_true != c) & (y_pred != c)))
+        fp = int(np.sum((y_true != c) & (y_pred == c)))
+        fn = int(np.sum((y_true == c) & (y_pred != c)))
+
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+        f1_scores.append(f1)
+
+        print(f"{class_names[c]:<12}{tp:>6}{tn:>6}{fp:>6}{fn:>6}{precision:>12.4f}{recall:>10.4f}{f1:>10.4f}")
+
+    macro_f1 = np.mean(f1_scores)
+    accuracy = np.sum(y_true == y_pred) / n * 100
+    print(f"Macro F1: {macro_f1:.4f}")
+    print(f"Overall Accuracy: {accuracy:.2f}%")
+
+    return macro_f1
 
 
 def add_gaussian_noise(X, noise_level=0.05):
@@ -232,6 +283,7 @@ def test_cnn(X_test, y_test, verbose=True):
         
         if verbose:
             print(f"  ✓ Predictions complete")
+            compute_and_print_f1_table("CNN (PyTorch)", y_test, y_pred, CLASS_NAMES)
             print(f"\n  Classification Report:")
             report = classification_report(y_test, y_pred, target_names=CLASS_NAMES, digits=4)
             for line in report.split('\n'):
@@ -294,6 +346,7 @@ def test_lstm(X_test, y_test, verbose=True):
         
         if verbose:
             print(f"  ✓ Predictions complete")
+            compute_and_print_f1_table("LSTM (PyTorch)", y_test, y_pred, CLASS_NAMES)
             print(f"\n  Classification Report:")
             report = classification_report(y_test, y_pred, target_names=CLASS_NAMES, digits=4)
             for line in report.split('\n'):
@@ -304,6 +357,64 @@ def test_lstm(X_test, y_test, verbose=True):
         
     except Exception as e:
         print(f"  ❌ Error testing LSTM: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def test_ensemble(X_test, y_test, verbose=True):
+    """
+    Test TensorFlow Ensemble model.
+
+    Args:
+        X_test: Test signals (N, timesteps) - raw (unscaled)
+        y_test: True labels
+        verbose: Print detailed results
+
+    Returns:
+        F1 score (macro) or None if error
+    """
+    try:
+        if verbose:
+            print("\n🤖 Testing Ensemble (TensorFlow)...")
+
+        if keras_load_model is None:
+            print("  ⚠️  TensorFlow not installed, skipping ensemble")
+            return None
+
+        if not os.path.exists(ENSEMBLE_MODEL_PATH):
+            print(f"  ⚠️  Ensemble model not found at {ENSEMBLE_MODEL_PATH}")
+            return None
+
+        # Load ensemble model and its scaler
+        model = keras_load_model(ENSEMBLE_MODEL_PATH)
+        scaler = joblib.load(ENSEMBLE_SCALER_PATH)
+        label_encoder = joblib.load(ENSEMBLE_LABEL_ENCODER_PATH)
+
+        # Scale using the saved scaler
+        X_scaled = scaler.transform(X_test)
+        X_tf = X_scaled.reshape(-1, SIGNAL_LENGTH, 1).astype(np.float32)
+
+        # Predict
+        probs = model.predict(X_tf, verbose=0)
+        y_pred = np.argmax(probs, axis=1)
+
+        # Compute F1 score
+        f1 = f1_score(y_test, y_pred, average='macro')
+
+        if verbose:
+            print(f"  ✓ Predictions complete")
+            compute_and_print_f1_table("ENSEMBLE (TensorFlow CNN+LSTM)", y_test, y_pred, CLASS_NAMES)
+            print(f"\n  Classification Report:")
+            report = classification_report(y_test, y_pred, target_names=CLASS_NAMES, digits=4)
+            for line in report.split('\n'):
+                print(f"  {line}")
+            print_confusion_matrix(y_test, y_pred)
+
+        return f1
+
+    except Exception as e:
+        print(f"  ❌ Error testing Ensemble: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -383,6 +494,12 @@ def main():
         f1_lstm = test_lstm(X_test_norm, y_test)
         if f1_lstm is not None:
             results_clean['LSTM'] = f1_lstm
+
+    # Test Ensemble (TensorFlow) - uses raw X_test, scaled internally
+    if test_cnn_model and test_lstm_model and os.path.exists(ENSEMBLE_MODEL_PATH):
+        f1_ens = test_ensemble(X_test, y_test)
+        if f1_ens is not None:
+            results_clean['Ensemble'] = f1_ens
     
     # ============================================================
     # TEST WITH GAUSSIAN NOISE
@@ -447,7 +564,7 @@ def main():
     print("│ Model       │ Clean Data  │ Noisy Data  │ Drop (%)      │")
     print("├─────────────┼─────────────┼─────────────┼───────────────┤")
     
-    for model_name in ['CNN', 'LSTM']:
+    for model_name in ['CNN', 'LSTM', 'Ensemble']:
         clean = results_clean.get(model_name, 0)
         noisy = results_noisy.get(model_name, 0)
         drop = ((clean - noisy) / clean * 100) if clean > 0 else 0
@@ -465,7 +582,7 @@ def main():
     print("Model Performance Summary:")
     print("-" * 60)
     
-    for model_name in ['CNN', 'LSTM']:
+    for model_name in ['CNN', 'LSTM', 'Ensemble']:
         clean = results_clean.get(model_name)
         if clean is not None:
             print(f"{model_name} F1 Score: {clean:.4f}")

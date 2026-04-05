@@ -16,10 +16,55 @@ import joblib
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
+from scipy.signal import resample as scipy_resample
+
 from src.preprocessing import butterworth_filter, load_dataset
 from src.model_definitions import ECGCNNModel as ECGNet, ECGLSTMModel as ECGLSTMNet
 from src.ensemble import ensemble_predict
 
+
+def normalize_signal_length(signal, target=2500):
+    original_length = len(signal)
+    
+    if original_length == target:
+        print(f"[SIGNAL] Perfect: {original_length} points")
+        return {
+            "signal": signal,
+            "original_length": original_length,
+            "was_normalized": False,
+            "low_confidence": False,
+            "warning": None
+        }
+    
+    elif original_length > target:
+        print(f"[SIGNAL] Too long: {original_length} → extracting best window")
+        best_var, best_start = 0, 0
+        for start in range(0, original_length - target, 50):
+            var = np.var(signal[start:start + target])
+            if var > best_var:
+                best_var = var
+                best_start = start
+        normalized = signal[best_start:best_start + target].astype(np.float32)
+        low_conf = original_length > target * 1.3
+        return {
+            "signal": normalized,
+            "original_length": original_length,
+            "was_normalized": True,
+            "low_confidence": low_conf,
+            "warning": f"Signal had {original_length} pts. Best 2500-point window extracted." if low_conf else None
+        }
+    
+    else:
+        print(f"[SIGNAL] Too short: {original_length} → resampling to {target}")
+        normalized = scipy_resample(signal, target).astype(np.float32)
+        low_conf = original_length < target * 0.7
+        return {
+            "signal": normalized,
+            "original_length": original_length,
+            "was_normalized": True,
+            "low_confidence": low_conf,
+            "warning": f"Signal had {original_length} pts, resampled to 2500. Results may be less accurate." if low_conf else None
+        }
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -133,8 +178,6 @@ def parse_signal_from_csv(file_content: bytes) -> np.ndarray:
     Returns:
         1D numpy array of signal values (typically 2500 points)
     """
-    EXPECTED_LENGTH = 2500
-    
     try:
         # Read CSV
         df = pd.read_csv(io.BytesIO(file_content))
@@ -147,22 +190,15 @@ def parse_signal_from_csv(file_content: bytes) -> np.ndarray:
         
         # Check if single column of signal values
         if len(df.columns) == 1:
-            signal = df.iloc[:, 0].values.astype(np.float32)
-            if len(signal) >= EXPECTED_LENGTH:
-                return signal[:EXPECTED_LENGTH]
+            return df.iloc[:, 0].values.astype(np.float32)
         
         # Try reading as spread across columns (single row)
         if len(df) == 1:
-            signal = df.iloc[0].values.astype(np.float32)
-            if len(signal) >= EXPECTED_LENGTH:
-                return signal[:EXPECTED_LENGTH]
+            return df.iloc[0].values.astype(np.float32)
         
         # Try reading all values as signal
-        signal = df.values.flatten().astype(np.float32)
-        if len(signal) >= EXPECTED_LENGTH:
-            return signal[:EXPECTED_LENGTH]
+        return df.values.flatten().astype(np.float32)
         
-        raise ValueError(f"Could not parse signal. Expected at least {EXPECTED_LENGTH} values, got {len(signal)}")
         
     except Exception as e:
         raise ValueError(f"Error parsing CSV: {str(e)}")
@@ -260,15 +296,9 @@ def predict():
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
         
-        # Validate signal length (expected 2500 points)
-        EXPECTED_LENGTH = 2500
-        if len(signal) < EXPECTED_LENGTH:
-            return jsonify({
-                "error": f"Invalid signal length. Expected at least {EXPECTED_LENGTH} points, got {len(signal)}"
-            }), 400
-        
-        # Truncate if longer
-        signal = signal[:EXPECTED_LENGTH]
+        # Normalize signal length
+        norm = normalize_signal_length(signal)
+        signal = norm["signal"]
         
         # Apply Butterworth filter
         signal_filtered = butterworth_filter(signal)
@@ -304,7 +334,11 @@ def predict():
             "probabilities": ensemble_result["probabilities"],
             "signal": signal_filtered.tolist(),
             "cnn_result": LABEL_MAP[cnn_pred],
-            "lstm_result": LABEL_MAP[lstm_pred]
+            "lstm_result": LABEL_MAP[lstm_pred],
+            "original_length": norm["original_length"],
+            "was_normalized": norm["was_normalized"],
+            "low_confidence": norm["low_confidence"],
+            "signal_warning": norm["warning"]
         }
         
         return jsonify(response)
@@ -339,13 +373,11 @@ def predict_ensemble():
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
 
-        EXPECTED_LENGTH = 2500
-        if len(signal) < EXPECTED_LENGTH:
-            return jsonify({
-                "error": f"Signal too short. Expected {EXPECTED_LENGTH}, got {len(signal)}"
-            }), 400
+        # Normalize signal length
+        norm = normalize_signal_length(signal)
+        signal = norm["signal"]
 
-        signal = signal[:EXPECTED_LENGTH]
+        EXPECTED_LENGTH = 2500
 
         # Apply same Butterworth filter as training
         signal_filtered = butterworth_filter(signal)
@@ -385,7 +417,11 @@ def predict_ensemble():
             "model_used": "CNN+LSTM Ensemble (TensorFlow/Keras)",
             "model_f1_score": "0.98 weighted average",
             "vfib_recall": "1.00 (zero false negatives)",
-            "warning": warning
+            "warning": warning,
+            "original_length": norm["original_length"],
+            "was_normalized": norm["was_normalized"],
+            "low_confidence": norm["low_confidence"],
+            "signal_warning": norm["warning"]
         }
 
         return jsonify(response)
