@@ -4,5 +4,4 @@ numpy
 pandas
 scipy
 torch
-xgboost
 scikit-learn

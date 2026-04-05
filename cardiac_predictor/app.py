@@ -1,10 +1,9 @@
 """
 Flask API for cardiac arrhythmia prediction.
-Provides endpoint for ECG signal classification using ensemble of models.
+Provides endpoint for ECG signal classification using CNN and LSTM models.
 """
 
 import io
-import pickle
 import numpy as np
 import pandas as pd
 import torch
@@ -13,8 +12,7 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 from src.preprocessing import butterworth_filter, load_dataset
-from src.feature_extraction import extract_features
-from src.model_definitions import ECGNet, ECGLSTMNet
+from src.model_definitions import ECGCNNModel as ECGNet, ECGLSTMModel as ECGLSTMNet
 from src.ensemble import ensemble_predict
 
 
@@ -23,42 +21,40 @@ app = Flask(__name__)
 CORS(app)
 
 # Global model references
-xgb_model = None
 cnn_model = None
 lstm_model = None
 device = None
 
-# Label mapping
-LABEL_MAP = {0: "Normal", 1: "AFib", 2: "VFib"}
+# Label mapping (alphabetical order from LabelEncoder)
+LABEL_MAP = {0: "AFib", 1: "Normal", 2: "VFib"}
 
 
 def load_models():
     """
-    Load all three models at startup.
+    Load CNN and LSTM models at startup.
     Called once when the application starts.
     """
-    global xgb_model, cnn_model, lstm_model, device
+    global cnn_model, lstm_model, device
     
     # Set device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    # Load XGBoost model
-    print("Loading XGBoost model...")
-    with open('models/xgb_model.pkl', 'rb') as f:
-        xgb_model = pickle.load(f)
+    # Signal parameters (must match training)
+    SIGNAL_LENGTH = 2500  # Original signal length
+    LSTM_LENGTH = 500     # Downsampled for LSTM (every 5th point)
     
     # Load CNN model
     print("Loading CNN model...")
-    cnn_model = ECGNet()
-    cnn_model.load_state_dict(torch.load('models/cnn_model.pt', map_location=device))
+    cnn_model = ECGNet(input_length=SIGNAL_LENGTH)
+    cnn_model.load_state_dict(torch.load('models/cnn_model.h5', map_location=device, weights_only=True))
     cnn_model.to(device)
     cnn_model.eval()
     
     # Load LSTM model
     print("Loading LSTM model...")
-    lstm_model = ECGLSTMNet()
-    lstm_model.load_state_dict(torch.load('models/lstm_model.pt', map_location=device))
+    lstm_model = ECGLSTMNet(input_length=LSTM_LENGTH)
+    lstm_model.load_state_dict(torch.load('models/lstm_model.h5', map_location=device, weights_only=True))
     lstm_model.to(device)
     lstm_model.eval()
     
@@ -78,8 +74,10 @@ def parse_signal_from_csv(file_content: bytes) -> np.ndarray:
         file_content: Raw bytes of uploaded CSV file
         
     Returns:
-        1D numpy array of 960 signal values
+        1D numpy array of signal values (typically 2500 points)
     """
+    EXPECTED_LENGTH = 2500
+    
     try:
         # Read CSV
         df = pd.read_csv(io.BytesIO(file_content))
@@ -87,28 +85,27 @@ def parse_signal_from_csv(file_content: bytes) -> np.ndarray:
         # Check if it's dataset format with 'label' column
         if 'label' in df.columns:
             # Use load_dataset logic for first row
-            temp_file = io.BytesIO(file_content)
             X, _ = load_dataset_from_bytes(file_content)
             return X[0]
         
         # Check if single column of signal values
         if len(df.columns) == 1:
             signal = df.iloc[:, 0].values.astype(np.float32)
-            if len(signal) == 960:
-                return signal
+            if len(signal) >= EXPECTED_LENGTH:
+                return signal[:EXPECTED_LENGTH]
         
         # Try reading as spread across columns (single row)
         if len(df) == 1:
             signal = df.iloc[0].values.astype(np.float32)
-            if len(signal) == 960:
-                return signal
+            if len(signal) >= EXPECTED_LENGTH:
+                return signal[:EXPECTED_LENGTH]
         
         # Try reading all values as signal
         signal = df.values.flatten().astype(np.float32)
-        if len(signal) >= 960:
-            return signal[:960]
+        if len(signal) >= EXPECTED_LENGTH:
+            return signal[:EXPECTED_LENGTH]
         
-        raise ValueError(f"Could not parse signal. Expected 960 values, got {len(signal)}")
+        raise ValueError(f"Could not parse signal. Expected at least {EXPECTED_LENGTH} values, got {len(signal)}")
         
     except Exception as e:
         raise ValueError(f"Error parsing CSV: {str(e)}")
@@ -185,7 +182,7 @@ def predict():
     Predict cardiac arrhythmia from ECG signal.
     
     Accepts CSV file with key 'ecg'.
-    Returns JSON with prediction results from all models and ensemble.
+    Returns JSON with prediction results from CNN and LSTM models.
     """
     try:
         # Check if file is in request
@@ -206,37 +203,42 @@ def predict():
         except ValueError as e:
             return jsonify({"error": str(e)}), 400
         
-        # Validate signal length
-        if len(signal) != 960:
+        # Validate signal length (expected 2500 points)
+        EXPECTED_LENGTH = 2500
+        if len(signal) < EXPECTED_LENGTH:
             return jsonify({
-                "error": f"Invalid signal length. Expected 960 points, got {len(signal)}"
+                "error": f"Invalid signal length. Expected at least {EXPECTED_LENGTH} points, got {len(signal)}"
             }), 400
+        
+        # Truncate if longer
+        signal = signal[:EXPECTED_LENGTH]
         
         # Apply Butterworth filter
         signal_filtered = butterworth_filter(signal)
         
-        # XGBoost prediction
-        features = extract_features(signal_filtered)
-        xgb_pred = int(xgb_model.predict(features.reshape(1, -1))[0])
+        # Normalize signal for neural networks
+        from sklearn.preprocessing import StandardScaler
+        scaler = StandardScaler()
+        signal_normalized = scaler.fit_transform(signal_filtered.reshape(-1, 1)).flatten()
         
         # CNN prediction
-        # Reshape to (1, 1, 960) for CNN
-        cnn_input = torch.FloatTensor(signal_filtered).unsqueeze(0).unsqueeze(0).to(device)
+        # Reshape to (1, timesteps, 1) - model transposes internally
+        cnn_input = torch.FloatTensor(signal_normalized).unsqueeze(0).unsqueeze(2).to(device)
         with torch.no_grad():
             cnn_output = cnn_model(cnn_input)
             cnn_probs = F.softmax(cnn_output, dim=1).cpu().numpy()[0]
             cnn_pred = int(np.argmax(cnn_probs))
         
-        # LSTM prediction
-        # Reshape to (1, 960, 1) for LSTM
-        lstm_input = torch.FloatTensor(signal_filtered).unsqueeze(0).unsqueeze(2).to(device)
+        # LSTM prediction (uses downsampled signal - every 5th point)
+        signal_downsampled = signal_normalized[::5]  # 2500 -> 500 points
+        lstm_input = torch.FloatTensor(signal_downsampled).unsqueeze(0).unsqueeze(2).to(device)
         with torch.no_grad():
             lstm_output = lstm_model(lstm_input)
             lstm_probs = F.softmax(lstm_output, dim=1).cpu().numpy()[0]
             lstm_pred = int(np.argmax(lstm_probs))
         
-        # Ensemble prediction
-        ensemble_result = ensemble_predict(xgb_pred, cnn_pred, lstm_pred, cnn_probs.tolist())
+        # Ensemble prediction (CNN and LSTM only)
+        ensemble_result = ensemble_predict(cnn_pred, lstm_pred, cnn_probs.tolist())
         
         # Build response
         response = {
@@ -244,7 +246,6 @@ def predict():
             "confidence": ensemble_result["confidence"],
             "probabilities": ensemble_result["probabilities"],
             "signal": signal_filtered.tolist(),
-            "xgb_result": LABEL_MAP[xgb_pred],
             "cnn_result": LABEL_MAP[cnn_pred],
             "lstm_result": LABEL_MAP[lstm_pred]
         }
@@ -260,7 +261,7 @@ def predict():
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint."""
-    return jsonify({"status": "healthy", "models_loaded": all([xgb_model, cnn_model, lstm_model])})
+    return jsonify({"status": "healthy", "models_loaded": all([cnn_model, lstm_model])})
 
 
 # Load models at startup

@@ -1,116 +1,123 @@
 """
 PyTorch model definitions for ECG classification.
-Contains CNN (ECGNet) and LSTM (ECGLSTMNet) architectures.
+Contains CNN and LSTM architectures.
 """
 
 import torch
 import torch.nn as nn
 
 
-class ECGNet(nn.Module):
+class ECGCNNModel(nn.Module):
     """
-    Convolutional Neural Network for ECG classification.
+    1D CNN model for ECG classification.
     
     Architecture:
-    - 3 convolutional blocks with BatchNorm, ReLU, and MaxPooling
-    - Fully connected layers with dropout for classification
+    - 3 Conv1D blocks with BatchNorm, ReLU, and MaxPooling
+    - Global Average Pooling for variable-length sequences
+    - Dense layers with dropout for classification
+    - Softmax output for 3 classes
     
-    Input shape: (batch, 1, 960)
-    Output shape: (batch, 3) - raw logits for 3 classes
+    Input shape: (batch, timesteps, 1) - will be transposed internally
+    Output shape: (batch, 3)
     """
     
-    def __init__(self):
-        """Initialize the ECGNet CNN architecture."""
-        super(ECGNet, self).__init__()
-        
-        # Convolutional Block 1
-        # Input: (batch, 1, 960) → Output: (batch, 32, 480)
-        self.conv1 = nn.Conv1d(in_channels=1, out_channels=32, kernel_size=5, padding=2)
-        self.bn1 = nn.BatchNorm1d(32)
-        self.relu1 = nn.ReLU()
-        self.pool1 = nn.MaxPool1d(kernel_size=2)
-        
-        # Convolutional Block 2
-        # Input: (batch, 32, 480) → Output: (batch, 64, 240)
-        self.conv2 = nn.Conv1d(in_channels=32, out_channels=64, kernel_size=5, padding=2)
-        self.bn2 = nn.BatchNorm1d(64)
-        self.relu2 = nn.ReLU()
-        self.pool2 = nn.MaxPool1d(kernel_size=2)
-        
-        # Convolutional Block 3
-        # Input: (batch, 64, 240) → Output: (batch, 128, 120)
-        self.conv3 = nn.Conv1d(in_channels=64, out_channels=128, kernel_size=3, padding=1)
-        self.bn3 = nn.BatchNorm1d(128)
-        self.relu3 = nn.ReLU()
-        self.pool3 = nn.MaxPool1d(kernel_size=2)
-        
-        # Flatten layer
-        self.flatten = nn.Flatten()
-        
-        # Fully connected layers
-        # Input: 128 * 120 = 15360 features
-        self.fc1 = nn.Linear(128 * 120, 256)
-        self.relu_fc = nn.ReLU()
-        self.dropout = nn.Dropout(0.5)
-        self.fc2 = nn.Linear(256, 3)
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def __init__(self, input_length: int, num_classes: int = 3):
         """
-        Forward pass through the network.
+        Initialize CNN model.
         
         Args:
-            x: Input tensor of shape (batch, 1, 960)
+            input_length: Length of input signal (e.g., 2500)
+            num_classes: Number of output classes (default 3)
+        """
+        super(ECGCNNModel, self).__init__()
+        
+        # Conv Block 1: 32 filters, kernel size 5
+        self.conv1 = nn.Conv1d(1, 32, kernel_size=5, padding=2)
+        self.bn1 = nn.BatchNorm1d(32)
+        self.relu1 = nn.ReLU()
+        self.pool1 = nn.MaxPool1d(2)
+        
+        # Conv Block 2: 64 filters, kernel size 5
+        self.conv2 = nn.Conv1d(32, 64, kernel_size=5, padding=2)
+        self.bn2 = nn.BatchNorm1d(64)
+        self.relu2 = nn.ReLU()
+        self.pool2 = nn.MaxPool1d(2)
+        
+        # Conv Block 3: 128 filters, kernel size 3
+        self.conv3 = nn.Conv1d(64, 128, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm1d(128)
+        self.relu3 = nn.ReLU()
+        self.pool3 = nn.MaxPool1d(2)
+        
+        # Global Average Pooling
+        self.gap = nn.AdaptiveAvgPool1d(1)
+        
+        # Dense layers
+        self.fc1 = nn.Linear(128, 256)
+        self.relu_fc = nn.ReLU()
+        self.dropout = nn.Dropout(0.5)
+        self.fc2 = nn.Linear(256, num_classes)
+        
+        # Softmax for output probabilities
+        self.softmax = nn.Softmax(dim=1)
+    
+    def forward(self, x: torch.Tensor, return_probs: bool = True) -> torch.Tensor:
+        """
+        Forward pass.
+        
+        Args:
+            x: Input tensor of shape (batch, timesteps, 1)
+            return_probs: If True, return softmax probabilities; else return logits
             
         Returns:
-            Raw logits tensor of shape (batch, 3)
+            Output tensor of shape (batch, num_classes)
         """
-        # Conv Block 1
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu1(x)
-        x = self.pool1(x)
+        # Transpose from (batch, timesteps, 1) to (batch, 1, timesteps) for Conv1d
+        x = x.transpose(1, 2)
         
-        # Conv Block 2
-        x = self.conv2(x)
-        x = self.bn2(x)
-        x = self.relu2(x)
-        x = self.pool2(x)
+        # Conv blocks
+        x = self.pool1(self.relu1(self.bn1(self.conv1(x))))
+        x = self.pool2(self.relu2(self.bn2(self.conv2(x))))
+        x = self.pool3(self.relu3(self.bn3(self.conv3(x))))
         
-        # Conv Block 3
-        x = self.conv3(x)
-        x = self.bn3(x)
-        x = self.relu3(x)
-        x = self.pool3(x)
+        # Global average pooling
+        x = self.gap(x).squeeze(-1)
         
-        # Flatten and FC layers
-        x = self.flatten(x)
-        x = self.fc1(x)
-        x = self.relu_fc(x)
-        x = self.dropout(x)
+        # Dense layers
+        x = self.dropout(self.relu_fc(self.fc1(x)))
         x = self.fc2(x)
+        
+        if return_probs:
+            x = self.softmax(x)
         
         return x
 
 
-class ECGLSTMNet(nn.Module):
+class ECGLSTMModel(nn.Module):
     """
-    LSTM-based Neural Network for ECG classification.
+    LSTM model for ECG classification.
     
     Architecture:
-    - 2-layer LSTM with dropout
-    - Fully connected layers for classification
+    - 2 LSTM layers with dropout
+    - Dense layers for classification
+    - Softmax output for 3 classes
     
-    Input shape: (batch, 960, 1)
-    Output shape: (batch, 3) - raw logits for 3 classes
+    Input shape: (batch, timesteps, 1)
+    Output shape: (batch, 3)
     """
     
-    def __init__(self):
-        """Initialize the ECGLSTMNet LSTM architecture."""
-        super(ECGLSTMNet, self).__init__()
+    def __init__(self, input_length: int, num_classes: int = 3):
+        """
+        Initialize LSTM model.
         
-        # LSTM layer
-        # Input: (batch, 960, 1) → Output: (batch, 960, 128)
-        self.lstm = nn.LSTM(
+        Args:
+            input_length: Length of input signal (e.g., 2500)
+            num_classes: Number of output classes (default 3)
+        """
+        super(ECGLSTMModel, self).__init__()
+        
+        # LSTM layers
+        self.lstm1 = nn.LSTM(
             input_size=1,
             hidden_size=128,
             num_layers=2,
@@ -118,34 +125,37 @@ class ECGLSTMNet(nn.Module):
             dropout=0.3
         )
         
-        # Fully connected layers
+        # Dense layers
         self.fc1 = nn.Linear(128, 64)
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(0.3)
-        self.fc2 = nn.Linear(64, 3)
+        self.fc2 = nn.Linear(64, num_classes)
+        
+        # Softmax for output probabilities
+        self.softmax = nn.Softmax(dim=1)
     
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_probs: bool = True) -> torch.Tensor:
         """
-        Forward pass through the network.
+        Forward pass.
         
         Args:
-            x: Input tensor of shape (batch, 960, 1)
+            x: Input tensor of shape (batch, timesteps, 1)
+            return_probs: If True, return softmax probabilities; else return logits
             
         Returns:
-            Raw logits tensor of shape (batch, 3)
+            Output tensor of shape (batch, num_classes)
         """
         # LSTM forward pass
-        # lstm_out shape: (batch, 960, 128)
-        lstm_out, (hidden, cell) = self.lstm(x)
+        lstm_out, (hidden, cell) = self.lstm1(x)
         
-        # Take the output from the last timestep
-        # Shape: (batch, 128)
-        last_output = lstm_out[:, -1, :]
+        # Take output from last timestep
+        x = lstm_out[:, -1, :]
         
-        # Fully connected layers
-        x = self.fc1(last_output)
-        x = self.relu(x)
-        x = self.dropout(x)
+        # Dense layers
+        x = self.dropout(self.relu(self.fc1(x)))
         x = self.fc2(x)
+        
+        if return_probs:
+            x = self.softmax(x)
         
         return x

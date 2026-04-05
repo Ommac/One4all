@@ -3,15 +3,17 @@ Preprocessing module for ECG signal data.
 Contains Butterworth bandpass filter and dataset loading utilities.
 """
 
+import os
 import numpy as np
 import pandas as pd
 from scipy.signal import butter, filtfilt
+from sklearn.preprocessing import LabelEncoder
 import ast
 import json
 from typing import Tuple
 
 
-def butterworth_filter(signal: np.ndarray) -> np.ndarray:
+def butterworth_filter(signal: np.ndarray, fs: int = 360) -> np.ndarray:
     """
     Apply a Butterworth bandpass filter to an ECG signal.
     
@@ -19,7 +21,8 @@ def butterworth_filter(signal: np.ndarray) -> np.ndarray:
     which is the typical range for cardiac electrical activity.
     
     Args:
-        signal: 1D numpy array of ECG signal values (960 points)
+        signal: 1D numpy array of ECG signal values
+        fs: Sampling rate in Hz (default 360)
         
     Returns:
         Filtered 1D numpy array of same shape as input
@@ -27,13 +30,15 @@ def butterworth_filter(signal: np.ndarray) -> np.ndarray:
     # Filter parameters
     lowcut = 0.5      # Low frequency cutoff in Hz
     highcut = 40.0    # High frequency cutoff in Hz
-    fs = 360          # Sampling rate in Hz
     order = 4         # Filter order
     
     # Calculate normalized frequencies (Nyquist frequency = fs/2)
     nyquist = fs / 2.0
     low = lowcut / nyquist
     high = highcut / nyquist
+    
+    # Clamp high frequency to valid range
+    high = min(high, 0.99)
     
     # Design Butterworth bandpass filter
     b, a = butter(order, [low, high], btype='band')
@@ -44,12 +49,12 @@ def butterworth_filter(signal: np.ndarray) -> np.ndarray:
     return filtered_signal
 
 
-def _parse_signal_string(signal_str: str) -> np.ndarray:
+def parse_signal_string(signal_str: str) -> np.ndarray:
     """
     Parse a signal stored as a string representation of a list.
     
     Handles formats like "[0.031, 0.038, ...]" using ast.literal_eval
-    or json.loads as fallback.
+    or json.loads as fallback, or comma-separated values.
     
     Args:
         signal_str: String representation of signal list
@@ -57,103 +62,100 @@ def _parse_signal_string(signal_str: str) -> np.ndarray:
     Returns:
         1D numpy array of signal values
     """
+    # Try ast.literal_eval first (handles Python list syntax like "[0.1, 0.2, ...]")
     try:
-        # Try ast.literal_eval first (handles Python list syntax)
         signal_list = ast.literal_eval(signal_str)
         return np.array(signal_list, dtype=np.float32)
     except (ValueError, SyntaxError):
         pass
     
+    # Try json.loads as fallback
     try:
-        # Try json.loads as fallback
         signal_list = json.loads(signal_str)
         return np.array(signal_list, dtype=np.float32)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, TypeError):
+        pass
+    
+    # Try comma-separated values (no brackets)
+    try:
+        values = [float(x.strip()) for x in signal_str.split(',')]
+        return np.array(values, dtype=np.float32)
+    except ValueError:
         pass
     
     raise ValueError(f"Could not parse signal string: {signal_str[:50]}...")
 
 
-def load_dataset(filepath: str) -> Tuple[np.ndarray, np.ndarray]:
+def load_dataset(filepath: str) -> Tuple[np.ndarray, np.ndarray, LabelEncoder]:
     """
-    Load ECG dataset from CSV file, handling both signal storage formats.
+    Load ECG dataset from CSV file.
     
-    Format A: signal column contains a string like "[0.031, 0.038, ...]"
-    Format B: signal values spread across columns (col1, col2, ... col960)
+    Expects CSV with columns:
+    - 'label': String labels (Normal, AFib, VFib)
+    - 'signal': ECG signal as string list "[0.031, 0.038, ...]"
     
     Args:
         filepath: Path to the CSV file containing ECG data
         
     Returns:
-        Tuple of (X, y) where:
-            X: numpy array of shape (N, 960) containing signal data
-            y: numpy array of shape (N,) containing integer labels (0, 1, or 2)
+        Tuple of (X, y, label_encoder) where:
+            X: numpy array of shape (N, signal_length) containing signal data
+            y: numpy array of shape (N,) containing encoded integer labels
+            label_encoder: Fitted LabelEncoder for inverse transform
+            
+    Raises:
+        FileNotFoundError: If filepath does not exist
+        ValueError: If required columns are missing
     """
-    # Label mapping: string labels to integer encoding
-    label_map = {
-        "Normal": 0,
-        "AFib": 1,
-        "VFib": 2
-    }
+    # Check if file exists
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(f"Dataset not found: {filepath}")
     
     # Read CSV file
     df = pd.read_csv(filepath)
     
-    # Initialize lists to collect signals and labels
+    # Validate required columns
+    if 'label' not in df.columns:
+        raise ValueError("CSV must have 'label' column")
+    if 'signal' not in df.columns:
+        raise ValueError("CSV must have 'signal' column")
+    
+    print(f"Loaded {len(df)} samples from {filepath}")
+    
+    # Parse all signals
     signals = []
-    labels = []
-    
-    # Process each row
     for idx, row in df.iterrows():
-        # Extract label (always in 'label' column)
-        label_str = row['label']
-        label_int = label_map[label_str]
-        labels.append(label_int)
-        
-        # Check if 'signal' column exists and contains string data (Format A)
-        if 'signal' in df.columns:
-            signal_value = row['signal']
-            
-            # Check if it's a string (Format A)
-            if isinstance(signal_value, str):
-                signal = _parse_signal_string(signal_value)
-                signals.append(signal)
-                continue
-            
-            # If signal column exists but value is numeric, might be first value of spread format
-            # Fall through to Format B handling
-        
-        # Format B: signal spread across multiple columns
-        # Get all columns except 'label' and optionally 'signal'
-        numeric_cols = [col for col in df.columns if col != 'label']
-        if 'signal' in numeric_cols and isinstance(row['signal'], str):
-            numeric_cols.remove('signal')
-        
-        # Extract numeric values from all columns after label
-        signal_values = []
-        for col in numeric_cols:
-            try:
-                val = float(row[col])
-                signal_values.append(val)
-            except (ValueError, TypeError):
-                continue
-        
-        signal = np.array(signal_values, dtype=np.float32)
-        
-        # Ensure we have exactly 960 points
-        if len(signal) != 960:
-            # If signal column had partial data, try combining
-            if 'signal' in df.columns and not isinstance(row['signal'], str):
-                try:
-                    first_val = float(row['signal'])
-                    signal = np.concatenate([[first_val], signal])
-                except (ValueError, TypeError):
-                    pass
-        
-        signals.append(signal)
+        signal_str = row['signal']
+        try:
+            signal = parse_signal_string(signal_str)
+            signals.append(signal)
+        except ValueError as e:
+            print(f"Warning: Skipping row {idx} - {e}")
+            continue
     
-    # Convert to numpy arrays
-    X = np.array(signals, dtype=np.float32)
-    y = np.array(labels, dtype=np.int64)
+    # Stack signals into numpy array
+    X = np.stack(signals, axis=0).astype(np.float32)
     
-    return X, y
+    # Encode labels using LabelEncoder
+    label_encoder = LabelEncoder()
+    y = label_encoder.fit_transform(df['label'].values)
+    
+    print(f"Signal shape: {X.shape}")
+    print(f"Labels: {dict(zip(label_encoder.classes_, range(len(label_encoder.classes_))))}")
+    print(f"Class distribution: {dict(zip(*np.unique(y, return_counts=True)))}")
+    
+    return X, y, label_encoder
+
+
+def preprocess_for_nn(X: np.ndarray) -> np.ndarray:
+    """
+    Prepare data for CNN/LSTM (3D: samples x timesteps x channels).
+    
+    Args:
+        X: Signal array of shape (samples, timesteps)
+        
+    Returns:
+        3D array of shape (samples, timesteps, 1)
+    """
+    # Add channel dimension for Keras Conv1D/LSTM
+    return np.expand_dims(X, axis=-1)
