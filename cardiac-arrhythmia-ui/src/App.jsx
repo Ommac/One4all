@@ -540,7 +540,38 @@ export default function App() {
             />
 
             <div className="stack">
+              {response?.low_confidence === true && (
+                <div
+                  style={{
+                    background: '#fff8eb',
+                    border: '1px solid #f59e0b',
+                    color: '#92400e',
+                    padding: '12px',
+                    borderRadius: '8px',
+                    marginBottom: '16px',
+                  }}
+                >
+                  {'⚠️ Signal Quality Notice: Your signal had '}
+                  {response.original_length}
+                  {' points. Model is optimized for 2500 points (360Hz). Prediction may be less accurate.'}
+                </div>
+              )}
+
               <ResultPanel result={response} loading={loading} />
+
+              {response?.was_normalized === true && response?.low_confidence === false && (
+                <div
+                  style={{
+                    color: '#6b7280',
+                    fontSize: '0.82rem',
+                    marginTop: '8px',
+                  }}
+                >
+                  {'ℹ️ Signal normalized from '}
+                  {response.original_length}
+                  {' → 2500 points'}
+                </div>
+              )}
 
               <section className="card chart-card">
                 <div className="section-header">
