@@ -164,44 +164,32 @@ def load_ensemble_model():
 
 
 def parse_signal_from_csv(file_content: bytes) -> np.ndarray:
-    """
-    Parse ECG signal from uploaded CSV file.
-    
-    Handles multiple formats:
-    1. Full dataset format with 'label' and 'signal' columns
-    2. Raw signal as single column of values
-    3. Signal spread across multiple columns
-    
-    Args:
-        file_content: Raw bytes of uploaded CSV file
-        
-    Returns:
-        1D numpy array of signal values (typically 2500 points)
-    """
+    import re
+
     try:
-        # Read CSV
-        df = pd.read_csv(io.BytesIO(file_content))
-        
-        # Check if it's dataset format with 'label' column
-        if 'label' in df.columns:
-            # Use load_dataset logic for first row
-            X, _ = load_dataset_from_bytes(file_content)
-            return X[0]
-        
-        # Check if single column of signal values
-        if len(df.columns) == 1:
-            return df.iloc[:, 0].values.astype(np.float32)
-        
-        # Try reading as spread across columns (single row)
-        if len(df) == 1:
-            return df.iloc[0].values.astype(np.float32)
-        
-        # Try reading all values as signal
-        return df.values.flatten().astype(np.float32)
-        
-        
+        # Read raw file content
+        content = file_content.decode('utf-8')
+
+        # Remove quotes
+        content = content.replace('"', '')
+
+        # Replace commas with spaces
+        content = content.replace(',', ' ')
+
+        # Extract all numeric values using regex
+        numbers = re.findall(r'-?\d+\.\d+|-?\d+', content)
+
+        # Convert to float
+        values = [float(num) for num in numbers]
+
+        if len(values) == 0:
+            raise ValueError("No valid numeric ECG data found in CSV")
+
+        import numpy as np
+        return np.array(values, dtype=np.float32)
+
     except Exception as e:
-        raise ValueError(f"Error parsing CSV: {str(e)}")
+        raise ValueError(f"CSV parsing failed: {str(e)}")
 
 
 def load_dataset_from_bytes(file_content: bytes) -> tuple:
