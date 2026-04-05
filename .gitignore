@@ -6,3 +6,6 @@ dist/
 .DS_Store
 __pycache__/
 node_modules/
+cardiac_predictor/models/ensemble_model.h5
+cardiac_predictor/models/ensemble_model.h5
+cardiac_predictor/models/ensemble_model.h5
