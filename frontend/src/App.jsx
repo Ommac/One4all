@@ -34,7 +34,7 @@ export default function App() {
       const formData = new FormData();
       formData.append('ecg', selectedFile);
 
-      const response = await fetch(`${API_URL}/predict/ensemble`, {
+      const response = await fetch(`${API_URL}/predict`, {
         method: 'POST',
         body: formData,
       });
