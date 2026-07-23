@@ -11,7 +11,7 @@ import {
   computeQTc, detectAnomalyRegion, classifyVitals 
 } from './utils/ecg_utils';
 
-const API_URL = 'http://localhost:5000';
+const API_URL = "https://one4all-p9b9.onrender.com";
 
 export default function App() {
   const [file, setFile] = useState(null);
