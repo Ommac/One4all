@@ -96,7 +96,7 @@ export default function UploadCard({
       </button>
 
       <div className="helper-note">
-        Files are sent to <code>http://localhost:5000/predict/ensemble</code> using
+        Files are sent to <code>https://one4all-p9b9.onrender.com/predict/ensemble</code> using
         multipart upload with the <code>ecg</code> key.
       </div>
     </section>
